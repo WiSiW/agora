@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>集成声网-多人视频聊天</title>
+    <script src="AgoraRTCSDK-2.3.1.js"></script>
+    <script src="jquery-2.0.2.min.js"></script>
+</head>
+<body>
+    <input id="user_id" value="1">
+    <input id="room_id" value="1000">
+    <button onclick="start()">开始通话</button>
+    <button onclick="subscribe()">订阅他人视频信息</button>
+    <button onclick="openCamera()">开启视频</button>
+    <button onclick="closeCamera()">关闭视频</button>
+    <button onclick="openMicrophone()">开启音频</button>
+    <button onclick="closeMicrophone()">关闭音频</button>
+    <div id="video" style="margin:0 auto;">
+        <div id="agora_local" style="float:left;width:140px;height:140px;display:inline-block;"></div>
+    </div>
+</body>
+<script>
+    var client,
+            localStream,
+            others = [],
+            id = document.getElementById("id").val(),
+            room_id = document.getElementById("room_id").val();
+
+    function start() {
+        getLocalDevices();
+    }
+    function openCamera() {
+        localStream.enableVideo();
+    }
+    function closeCamera() {
+        localStream.disableVideo();
+    }
+    function openMicrophone() {
+        localStream.enableAudio();
+    }
+    function closeMicrophone() {
+        localStream.disableAudio();
+    }
+
+
+    // 获取本地设备信息
+    function getLocalDevices() {
+        if(!AgoraRTC.checkSystemRequirements()) {
+            alert("browser is no support webRTC");
+        }
+        /* simulated data to proof setLogLevel() */
+        /* 日志 */
+        AgoraRTC.Logger.error('this is error');
+        AgoraRTC.Logger.warning('this is warning');
+        AgoraRTC.Logger.info('this is info');
+        AgoraRTC.Logger.debug('this is debug');
+
+        AgoraRTC.getDevices(function (devices) {
+            var has_camera,has_microphone,camera, microphone;
+            has_camera = false;
+            has_microphone = false;
+            camera = true;
+            microphone = true;
+            for (var i = 0; i !== devices.length; ++i) {
+                var device = devices[i];
+                if (device.kind === 'audioinput') {
+                    has_microphone = true;
+                    console.log('audioinput');
+                    console.log(device);
+                }
+                if (device.kind === 'videoinput') {
+                    has_camera = true;
+                    console.log('videoinput');
+                    console.log(device);
+                } else {
+                    //console.log('Some other kind of source/device: ', device);
+                }
+            }
+            if(!has_camera){
+                alert("未检测到摄像头");
+                camera = false;
+            }
+            if(!has_microphone){
+                alert("未检测到麦克风");
+                microphone = false;
+            }
+            join({room_id:room_id,id:id,has_camera:camera,has_microphone:microphone});
+        });
+
+    }
+
+    // 加入房间
+    function join(data) {
+        var channel_key = null;
+
+        console.log("Init AgoraRTC client with vendor key: " + null);
+        client = AgoraRTC.createClient({mode: 'interop'});
+        client.init("appid", function () {
+            console.log("AgoraRTC client initialized");
+            client.join(channel_key, data.room_id ,data.id , function(uid) {
+                console.log("User " + uid + " join channel successfully");
+
+                if(!data.has_microphone && !data.has_camera){
+                    $("#agora_local").append("<img id='onlyMicrophone' src='camera_disabled.png'>"+"</img>");
+                }
+
+                if(data.has_camera || data.has_microphone){
+                    localStream = AgoraRTC.createStream({streamID: data.id, audio: data.has_microphone, video: data.has_camera, screen: false,mirror:false});
+                    //localStream.setVideoProfile('720p_3');
+                    localStream.setVideoProfile('120P');
+
+                    localStream.on("accessAllowed", function() {
+                        console.log("accessAllowed");
+                    });
+                    localStream.on("accessDenied", function() {
+                        console.log("accessDenied");
+                    });
+
+                    localStream.init(function() {
+                        console.log("getUserMedia successfully");
+                        localStream.play('agora_local');
+                        document.getElementById("video"+data.id).controls = "controls";
+                        if(!data.has_camera){
+                            $("#player_"+data.id).append("<img id='onlyMicrophone' src='microphone_enable.png'>"+"</img>");
+                        }
+
+                        client.publish(localStream, function (err) {
+                            console.log("Publish local stream error: " + err);
+                        });
+
+                        client.on('stream-published', function (evt) {
+                            console.log("Publish local stream successfully");
+                        });
+                    }, function (err) {
+                        console.log("getUserMedia failed", err);
+                    });
+                }
+            }, function(err) {
+                console.log("Join channel failed", err);
+            });
+        }, function (err) {
+            console.log("AgoraRTC client init failed", err);
+        });
+
+        channelKey = "";
+        client.on('error', function(err) {
+            console.log("Got error msg:", err.reason);
+            if (err.reason === 'DYNAMIC_KEY_TIMEOUT') {
+                client.renewChannelKey(channelKey, function(){
+                    console.log("Renew channel key successfully");
+                }, function(err){
+                    console.log("Renew channel key failed: ", err);
+                });
+            }
+        });
+
+
+        // 监控房间内他人
+        // 订阅他人的视频
+        subscribe();
+
+        // 有人离开
+        client.on('stream-removed', function (evt) {
+            var stream = evt.stream;
+            stream.stop();
+            $('#agora_remote' + stream.getId()).remove();
+            console.log("Remote stream is removed " + stream.getId());
+        });
+
+        client.on('peer-leave', function (evt) {
+            var stream = evt.stream;
+            if (stream) {
+                stream.stop();
+                $('#agora_remote' + stream.getId()).remove();
+                console.log(evt.uid + " leaved from this channel");
+            }
+        });
+
+        // 监控本地音视频的开关
+        // 关闭视频
+        client.on('mute-video', function (evt) {
+            console.log( evt.uid + "关闭视频");
+        });
+
+        // 开启视频
+        client.on('unmute-video', function (evt) {
+            console.log( evt.uid + "开启视频");
+        });
+
+        // 关闭音频
+        client.on('mute-audio', function(evt) {
+            console.log( evt.uid + "关闭音频");
+        });
+
+        // 开启音频
+        client.on('unmute-audio', function (evt) {
+            console.log( evt.uid + "开启音频");
+        });
+    }
+
+
+    function subscribe(){
+        client.on('stream-added', function (evt) {
+            var stream = evt.stream;
+            console.log("New stream added: " + stream.getId());
+            console.log("Subscribe ", stream);
+            client.subscribe(stream, function (err) {
+                console.log("Subscribe stream failed", err);
+            });
+
+        });
+
+        // 监控房间内其他人的加入,音视频的开启情况
+        client.on('stream-subscribed', function (evt) {
+            var other = {
+                id: evt.stream.getId(),
+                video: evt.stream.video,
+                audio: evt.stream.audio
+            };
+            others.push(other);
+            var stream = evt.stream;
+            console.log("Subscribe remote stream successfully: " + stream.getId());
+            if ($('div#video #agora_remote'+stream.getId()).length === 0) {
+                $('div#video').append('<div id="agora_remote'+stream.getId()+'" style="float:left; width:140px;height:140px;display:inline-block;"></div>');
+            }
+
+            stream.play('agora_remote' + stream.getId());
+            document.getElementById("video"+stream.getId()).controls = "controls";
+            if(!evt.stream.video){
+                $("#player_"+ evt.stream.getId()).append("<img id='onlyMicrophone' src='camera_disabled.png' style='position: inherit'>"+"</img>");
+            }
+        });
+    }
+
+</script>
+</html>
